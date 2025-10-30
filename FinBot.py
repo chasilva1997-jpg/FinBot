@@ -41,22 +41,21 @@ def conectar_sheets():
 
     if not sheet.get_all_values():
         sheet.append_row([
-            "Usuário", "Valor (R$)", "Categoria",
+            "Usuário", "Valor", "Categoria",
             "Data", "Forma de Pagamento", "Observações"
         ])
     return sheet
 
 
 def salvar_dados(nome, valor, categoria, data, forma_pagamento, observacoes):
-    """Salva uma linha de dados no Google Sheets."""
+    """Salva uma linha de dados no Google Sheets (formato limpo para Looker)."""
     sheet = conectar_sheets()
-    data_br = data.strftime("%d/%m/%Y")  # <- data sem hora
-    valor_formatado = f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    data_iso = data.strftime("%Y-%m-%d")  # formato ISO (sem hora)
     sheet.append_row([
         nome,
-        valor_formatado,
+        round(valor, 2),  # número puro (ex: 23.50)
         categoria.title(),
-        data_br,
+        data_iso,
         forma_pagamento.capitalize() if forma_pagamento else "—",
         observacoes or "—"
     ])
@@ -83,7 +82,7 @@ def parse_mensagem(mensagem, data_mensagem):
     if data_regex:
         data = datetime.strptime(data_regex.group(0), "%d/%m/%Y").date()
     else:
-        data = data_mensagem.date()  # usa só a data, sem hora
+        data = data_mensagem.date()  # apenas a data, sem hora
 
     obs = re.sub(r"\d+(?:[.,]\d+)?", "", mensagem)
     obs = re.sub(categoria, "", obs, flags=re.IGNORECASE)
@@ -146,14 +145,13 @@ def webhook():
 # FUNÇÕES AUXILIARES
 # ===============================
 async def registrar_webhook():
-    """Registra o webhook no Telegram."""
+    """Registra o webhook no Telegram e avisa que está online."""
     for tentativa in range(3):
         try:
             await bot.delete_webhook()
             await bot.set_webhook(WEBHOOK_URL)
             logging.info(f"✅ Webhook registrado com sucesso em {WEBHOOK_URL}")
 
-            # Mensagem de inicialização
             if ADMIN_CHAT_ID:
                 await bot.send_message(
                     chat_id=ADMIN_CHAT_ID,
@@ -188,7 +186,7 @@ def run_flask():
 # INICIALIZAÇÃO
 # ===============================
 if __name__ == "__main__":
-    logging.info("🚀 Iniciando FinBot com Webhook...")
+    logging.info("🚀 Iniciando FinBot com Webhook (modo Looker)...")
     Thread(target=run_flask).start()
 
     async def iniciar_bot():
@@ -197,6 +195,6 @@ if __name__ == "__main__":
         await app.initialize()
         await app.start()
         await app.updater.start_polling()
-        await asyncio.Event().wait()  # mantém o bot rodando
+        await asyncio.Event().wait()
 
     asyncio.run(iniciar_bot())
