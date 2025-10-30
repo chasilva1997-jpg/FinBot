@@ -3,7 +3,8 @@ import re
 import json
 import gspread
 import logging
-from datetime import datetime
+import asyncio
+from datetime import datetime, date
 from flask import Flask, request
 from threading import Thread
 from google.oauth2.service_account import Credentials
@@ -20,16 +21,17 @@ logging.basicConfig(
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 SHEET_ID = os.getenv("SHEET_ID")
 GOOGLE_CREDENTIALS = os.getenv("GOOGLE_CREDENTIALS")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # exemplo: https://finbotbeta.onrender.com/webhook
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")  # seu ID do Telegram (adicione no Render)
 
 if not all([TELEGRAM_TOKEN, SHEET_ID, GOOGLE_CREDENTIALS, WEBHOOK_URL]):
     raise Exception("❌ Variáveis de ambiente faltando. Verifique TELEGRAM_TOKEN, SHEET_ID, GOOGLE_CREDENTIALS, WEBHOOK_URL.")
 
 # ===============================
-# CONEXÃO COM GOOGLE SHEETS
+# GOOGLE SHEETS
 # ===============================
 def conectar_sheets():
-    """Conecta ao Google Sheets e retorna a primeira aba."""
+    """Conecta ao Google Sheets e retorna a aba principal."""
     info = json.loads(GOOGLE_CREDENTIALS)
     creds = Credentials.from_service_account_info(
         info, scopes=["https://www.googleapis.com/auth/spreadsheets"]
@@ -37,7 +39,6 @@ def conectar_sheets():
     client = gspread.authorize(creds)
     sheet = client.open_by_key(SHEET_ID).sheet1
 
-    # Cabeçalhos automáticos, se estiver vazia
     if not sheet.get_all_values():
         sheet.append_row([
             "Usuário", "Valor (R$)", "Categoria",
@@ -49,7 +50,7 @@ def conectar_sheets():
 def salvar_dados(nome, valor, categoria, data, forma_pagamento, observacoes):
     """Salva uma linha de dados no Google Sheets."""
     sheet = conectar_sheets()
-    data_br = data.strftime("%d/%m/%Y")
+    data_br = data.strftime("%d/%m/%Y")  # <- data sem hora
     valor_formatado = f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
     sheet.append_row([
         nome,
@@ -60,14 +61,13 @@ def salvar_dados(nome, valor, categoria, data, forma_pagamento, observacoes):
         observacoes or "—"
     ])
 
-
 # ===============================
 # INTERPRETA MENSAGEM
 # ===============================
 def parse_mensagem(mensagem, data_mensagem):
     """Extrai informações estruturadas da mensagem de texto."""
     valores = re.findall(r"\d+(?:[.,]\d+)?", mensagem)
-    valor = float(valores[0].replace(",", ".")) if valores else 0
+    valor = float(valores[0].replace(",", ".")) if valores else 0.0
 
     forma_pagamento = ""
     for fp in ["cartão", "cartao", "dinheiro", "pix", "transferência", "transferencia", "boleto"]:
@@ -83,7 +83,7 @@ def parse_mensagem(mensagem, data_mensagem):
     if data_regex:
         data = datetime.strptime(data_regex.group(0), "%d/%m/%Y").date()
     else:
-        data = data_mensagem.date()
+        data = data_mensagem.date()  # usa só a data, sem hora
 
     obs = re.sub(r"\d+(?:[.,]\d+)?", "", mensagem)
     obs = re.sub(categoria, "", obs, flags=re.IGNORECASE)
@@ -92,12 +92,11 @@ def parse_mensagem(mensagem, data_mensagem):
 
     return valor, categoria, data, forma_pagamento, observacoes
 
-
 # ===============================
 # BOT TELEGRAM
 # ===============================
 async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Processa cada mensagem recebida no Telegram."""
+    """Processa cada mensagem recebida."""
     try:
         mensagem = update.message.text
         data_mensagem = update.message.date
@@ -118,8 +117,7 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logging.error(f"Erro ao processar mensagem: {e}")
         if update.message:
-            await update.message.reply_text("⚠️ Ocorreu um erro ao registrar o gasto. Tente novamente em instantes.")
-
+            await update.message.reply_text("⚠️ Erro ao registrar o gasto. Tente novamente em instantes.")
 
 # ===============================
 # FLASK + WEBHOOK
@@ -131,11 +129,11 @@ app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), process_messag
 
 @flask_app.route("/")
 def home():
-    return "FinBotBeta com Webhook está rodando 🚀"
+    return "🚀 FinBot está online e operando com Webhook!"
 
 @flask_app.route("/webhook", methods=["POST"])
 def webhook():
-    """Recebe mensagens enviadas pelo Telegram."""
+    """Recebe mensagens do Telegram."""
     try:
         update = Update.de_json(request.get_json(force=True), bot)
         app.update_queue.put_nowait(update)
@@ -144,25 +142,61 @@ def webhook():
         logging.error(f"Erro no webhook: {e}")
         return "erro", 500
 
-
+# ===============================
+# FUNÇÕES AUXILIARES
+# ===============================
 async def registrar_webhook():
-    """Configura o webhook no Telegram."""
-    await bot.delete_webhook()
-    await bot.set_webhook(WEBHOOK_URL)
-    logging.info(f"✅ Webhook registrado em {WEBHOOK_URL}")
+    """Registra o webhook no Telegram."""
+    for tentativa in range(3):
+        try:
+            await bot.delete_webhook()
+            await bot.set_webhook(WEBHOOK_URL)
+            logging.info(f"✅ Webhook registrado com sucesso em {WEBHOOK_URL}")
 
+            # Mensagem de inicialização
+            if ADMIN_CHAT_ID:
+                await bot.send_message(
+                    chat_id=ADMIN_CHAT_ID,
+                    text="🤖 FinBotBeta está *online e pronto para registrar seus gastos!* 💰",
+                    parse_mode="Markdown"
+                )
+            return
+        except Exception as e:
+            logging.warning(f"Tentativa {tentativa+1}/3 falhou: {e}")
+            await asyncio.sleep(3)
+    logging.error("❌ Falha ao registrar o webhook após 3 tentativas.")
+
+async def lembrete_periodico():
+    """Envia lembrete a cada 3 horas para não esquecer de registrar gastos."""
+    if not ADMIN_CHAT_ID:
+        return
+    while True:
+        try:
+            await bot.send_message(
+                chat_id=ADMIN_CHAT_ID,
+                text="🕒 Lembrete: não esqueça de registrar seus gastos no FinBotBeta! 💸"
+            )
+        except Exception as e:
+            logging.error(f"Erro ao enviar lembrete: {e}")
+        await asyncio.sleep(3 * 60 * 60)  # 3 horas
 
 def run_flask():
     """Executa o servidor Flask."""
     flask_app.run(host="0.0.0.0", port=8080)
 
-
 # ===============================
 # INICIALIZAÇÃO
 # ===============================
 if __name__ == "__main__":
-    logging.info("🚀 Iniciando FinBotBeta com Webhook...")
+    logging.info("🚀 Iniciando FinBot com Webhook...")
     Thread(target=run_flask).start()
-    import asyncio
-    asyncio.run(registrar_webhook())
-    app.run_async()
+
+    async def iniciar_bot():
+        await registrar_webhook()
+        asyncio.create_task(lembrete_periodico())
+        await app.initialize()
+        await app.start()
+        await app.updater.start_polling()
+        await asyncio.Event().wait()  # mantém o bot rodando
+
+    asyncio.run(iniciar_bot())
