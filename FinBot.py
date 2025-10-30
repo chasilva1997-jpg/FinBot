@@ -20,6 +20,7 @@ GOOGLE_CREDENTIALS = os.getenv("GOOGLE_CREDENTIALS")
 # GOOGLE SHEETS
 # ===============================
 def conectar_sheets():
+    """Conecta ao Google Sheets e retorna a primeira aba."""
     if not GOOGLE_CREDENTIALS:
         raise Exception("❌ GOOGLE_CREDENTIALS não encontrada!")
 
@@ -29,31 +30,52 @@ def conectar_sheets():
     )
     client = gspread.authorize(creds)
     sheet = client.open_by_key(SHEET_ID).sheet1
+
+    # Se estiver vazia, cria cabeçalhos automaticamente
+    if not sheet.get_all_values():
+        sheet.append_row([
+            "user_id", "nome", "valor", "categoria",
+            "data", "forma_pagamento", "observacoes"
+        ])
+
     return sheet
 
 
-def salvar_dados(valor, categoria, data, forma_pagamento, observacoes):
+def salvar_dados(user_id, nome, valor, categoria, data, forma_pagamento, observacoes):
+    """Salva uma linha de dados no Google Sheets."""
     sheet = conectar_sheets()
-    sheet.append_row([valor, categoria, str(data), forma_pagamento, observacoes])
+    sheet.append_row([
+        user_id,
+        nome,
+        valor,
+        categoria,
+        str(data),
+        forma_pagamento,
+        observacoes
+    ])
 
 
 # ===============================
 # INTERPRETA MENSAGEM
 # ===============================
 def parse_mensagem(mensagem, data_mensagem):
+    """Extrai informações estruturadas da mensagem de texto."""
     valores = re.findall(r"\d+(?:\.\d+)?", mensagem)
     valor = float(valores[0]) if valores else 0
 
+    # Detecta forma de pagamento
     forma_pagamento = ""
     for fp in ["cartao", "cartão", "dinheiro", "pix", "transferencia", "boleto"]:
         if fp in mensagem.lower():
             forma_pagamento = fp.capitalize()
             break
 
+    # Identifica categoria
     palavras = re.findall(r"[A-Za-zÀ-ÿ]+", mensagem)
     palavras = [p for p in palavras if p.lower() != forma_pagamento.lower()]
     categoria = palavras[0] if palavras else "Geral"
 
+    # Extrai data (ou usa a data da mensagem)
     data_regex = re.search(r"(\d{2}/\d{2}/\d{4}|\d{4}-\d{2}-\d{2})", mensagem)
     if data_regex:
         data = datetime.strptime(
@@ -63,6 +85,7 @@ def parse_mensagem(mensagem, data_mensagem):
     else:
         data = data_mensagem.date()
 
+    # Limpa texto e define observações
     obs = re.sub(r"\d+(?:\.\d+)?", "", mensagem)
     obs = re.sub(categoria, "", obs, flags=re.IGNORECASE)
     obs = re.sub(forma_pagamento, "", obs, flags=re.IGNORECASE)
@@ -75,22 +98,37 @@ def parse_mensagem(mensagem, data_mensagem):
 # BOT DO TELEGRAM
 # ===============================
 async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Processa cada mensagem recebida no Telegram."""
     mensagem = update.message.text
     data_mensagem = update.message.date
+    user_id = update.message.from_user.id
+    nome = update.message.from_user.first_name
 
     valor, categoria, data, forma_pagamento, observacoes = parse_mensagem(mensagem, data_mensagem)
-    salvar_dados(valor, categoria, data, forma_pagamento, observacoes)
 
+    # Salva no Sheets
+    salvar_dados(user_id, nome, valor, categoria, data, forma_pagamento, observacoes)
+
+    # Resposta ao usuário
     await update.message.reply_text(
-        f"✅ R${valor:.2f} registrado!\n"
-        f"📂 {categoria}\n📅 {data}\n💳 {forma_pagamento}\n📝 {observacoes or '—'}"
+        f"✅ {nome}, gasto registrado!\n"
+        f"💰 R${valor:.2f}\n"
+        f"📂 {categoria}\n"
+        f"📅 {data}\n"
+        f"💳 {forma_pagamento or '—'}\n"
+        f"📝 {observacoes or '—'}"
     )
 
 
 def main():
+    """Inicia o bot do Telegram."""
+    if not TELEGRAM_TOKEN:
+        raise Exception("❌ TELEGRAM_TOKEN não encontrado!")
+
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), process_message))
-    print("🤖 FinBotBeta iniciado e aguardando mensagens...")
+
+    print("🤖 FinBot iniciado e aguardando mensagens...")
     app.run_polling(drop_pending_updates=True)
 
 
@@ -104,8 +142,12 @@ def home():
     return "FinBotBeta está rodando 🚀"
 
 def run_flask():
+    """Executa o servidor Flask para manter o bot ativo no Render."""
     flask_app.run(host="0.0.0.0", port=8080)
 
+# ===============================
+# INICIALIZAÇÃO
+# ===============================
 if __name__ == "__main__":
     Thread(target=run_flask).start()
     main()
