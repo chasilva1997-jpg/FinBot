@@ -202,7 +202,7 @@ async def registrar_webhook():
             if ADMIN_CHAT_ID:
                 await bot.send_message(
                     chat_id=ADMIN_CHAT_ID,
-                    text="🤖 FinBotBeta está *online e pronto para registrar seus gastos!* 💰",
+                    text="ESOTU PRONTO PARA REGISTRAR SEUS GASTOS!* 💰",
                     parse_mode="Markdown"
                 )
             return
@@ -223,7 +223,7 @@ async def lembrete_periodico():
         try:
             await bot.send_message(
                 chat_id=ADMIN_CHAT_ID,
-                text="🕒 Lembrete: não esqueça de registrar seus gastos no FinBotBeta! 💸"
+                text="🕒 Lembrete: REGISTRAR GASTOS... DISCIPLINA! 💸"
             )
             logging.info("📨 Lembrete enviado com sucesso!")
         except Exception as e:
@@ -250,3 +250,4 @@ if __name__ == "__main__":
         await asyncio.Event().wait()
 
     asyncio.run(iniciar_bot())
+
