@@ -1,129 +1,104 @@
 import os
-import logging
 import asyncio
 from flask import Flask, request
+import telegram
 from telegram import Update
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    filters,
-)
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
+from datetime import datetime
 
-# === Configuração de logs ===
-logging.basicConfig(
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    level=logging.INFO
-)
+# === VARIÁVEIS DE AMBIENTE ===
+TOKEN = os.getenv("BOT_TOKEN")
+SHEET_KEY = os.getenv("SHEET_KEY")
+CREDENTIALS_FILE = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
 
-# === Variáveis de ambiente ===
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-SHEET_ID = os.getenv("SHEET_ID")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-GOOGLE_CREDENTIALS = os.getenv("GOOGLE_CREDENTIALS")
-
-if not all([TELEGRAM_TOKEN, SHEET_ID, WEBHOOK_URL, GOOGLE_CREDENTIALS]):
-    raise Exception("❌ Variáveis de ambiente faltando. Verifique TELEGRAM_TOKEN, SHEET_ID, GOOGLE_CREDENTIALS, WEBHOOK_URL.")
-
-# === Conexão com Google Sheets ===
-import json
-creds_json = json.loads(GOOGLE_CREDENTIALS)
-scope = ["https://www.googleapis.com/auth/spreadsheets"]
-creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_json, scope)
+# === GOOGLE SHEETS CONFIG ===
+scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE, scope)
 client = gspread.authorize(creds)
-sheet = client.open_by_key(SHEET_ID).sheet1
+sheet = client.open_by_key(SHEET_KEY).sheet1
 
-# === Flask App (para Render e UptimeRobot) ===
+# === FLASK APP ===
 app = Flask(__name__)
 
-@app.route("/ping")
-def ping():
-    return "pong", 200
+# === TELEGRAM APP ===
+application = Application.builder().token(TOKEN).build()
 
-@app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
-def webhook():
-    update = Update.de_json(request.get_json(force=True), application.bot)
-    asyncio.run(application.process_update(update))
-    return "OK", 200
-
-
-# === Funções do Bot ===
-
+# === COMANDOS ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Olá! Envie o gasto no formato: valor, categoria.\nExemplo: 50, mercado")
+    await update.message.reply_text("Olá! Envie uma mensagem no formato:\n\n💰 valor, categoria, forma, data(opcional)")
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Use: /total para ver o total e /categoria para ver o total por categoria.")
-
-async def add_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-
-    if "," not in text:
-        await update.message.reply_text("❌ Formato inválido. Use: valor, categoria\nExemplo: 50, mercado")
-        return
-
+async def add_gasto(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        valor_str, categoria = text.split(",", 1)
-        valor = float(valor_str.replace(",", ".").strip())
-        categoria = categoria.strip().capitalize()
+        texto = update.message.text.strip()
+        partes = [p.strip() for p in texto.split(",")]
 
-        # Salva no Google Sheets
-        from datetime import datetime
-        sheet.append_row([update.effective_user.first_name, valor, categoria, datetime.now().strftime("%d/%m/%Y")])
+        if len(partes) < 2:
+            await update.message.reply_text("Use o formato: valor, categoria, forma, data(opcional)")
+            return
 
-        await update.message.reply_text(f"✅ Gasto de R$ {valor:.2f} registrado em {categoria}.")
+        valor_str = partes[0].replace("R$", "").replace(",", ".").strip()
+        valor = float(valor_str)
+
+        categoria = partes[1]
+        forma = partes[2] if len(partes) > 2 else "Desconhecida"
+        data = partes[3] if len(partes) > 3 else datetime.now().strftime("%d/%m/%Y")
+
+        # Salva os dados crus no Sheets
+        sheet.append_row([update.message.from_user.first_name, valor, categoria, data, forma])
+
+        await update.message.reply_text(f"✅ Gasto registrado: R${valor:.2f} - {categoria}")
+
     except Exception as e:
-        logging.error(f"Erro ao registrar gasto: {e}")
-        await update.message.reply_text("⚠️ Ocorreu um erro ao registrar o gasto.")
-
+        print(f"Erro ao registrar gasto: {e}")
+        await update.message.reply_text("⚠️ Erro ao registrar gasto. Verifique o formato e tente novamente.")
 
 async def total(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        dados = sheet.get_all_records()
-        total_gasto = sum(float(item["Valor"]) for item in dados)
-        await update.message.reply_text(f"💰 Total gasto: R$ {total_gasto:.2f}")
+        registros = sheet.get_all_values()[1:]  # Ignora cabeçalho
+        total_valor = sum(float(r[1]) for r in registros if r[1])
+        await update.message.reply_text(f"💰 Total registrado: R${total_valor:.2f}")
     except Exception as e:
-        logging.error(f"Erro ao calcular total: {e}")
-        await update.message.reply_text("⚠️ Erro ao calcular total.")
+        print(f"Erro ao calcular total: {e}")
+        await update.message.reply_text("⚠️ Erro ao calcular o total.")
 
-async def categoria(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        dados = sheet.get_all_records()
-        totais = {}
-
-        for item in dados:
-            cat = item["Categoria"]
-            val = float(item["Valor"])
-            totais[cat] = totais.get(cat, 0) + val
-
-        mensagem = "📊 Gastos por categoria:\n"
-        for cat, val in totais.items():
-            mensagem += f"• {cat}: R$ {val:.2f}\n"
-
-        await update.message.reply_text(mensagem)
-    except Exception as e:
-        logging.error(f"Erro ao calcular por categoria: {e}")
-        await update.message.reply_text("⚠️ Erro ao calcular por categoria.")
-
-
-# === Inicialização do Bot ===
-application = Application.builder().token(TELEGRAM_TOKEN).build()
-
+# === HANDLERS ===
 application.add_handler(CommandHandler("start", start))
-application.add_handler(CommandHandler("help", help_command))
 application.add_handler(CommandHandler("total", total))
-application.add_handler(CommandHandler("categoria", categoria))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, add_expense))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, add_gasto))
 
+# === WEBHOOK ===
+@app.route(f"/{TOKEN}", methods=["POST"])
+async def webhook():
+    try:
+        update = telegram.Update.de_json(request.get_json(force=True), application.bot)
 
-# === Iniciar webhook no Render ===
+        # Inicializa o bot se ainda não estiver rodando
+        if not application.running:
+            await application.initialize()
+            await application.start()
+
+        await application.process_update(update)
+    except Exception as e:
+        print(f"Erro no webhook: {e}")
+    return "OK", 200
+
+# === ROTA PING PARA O UPTIMEROBOT ===
+@app.route("/", methods=["GET"])
+def ping():
+    return "FinBot está ativo!", 200
+
+# === MAIN ===
 if __name__ == "__main__":
-    async def run():
-        await application.bot.set_webhook(url=f"{WEBHOOK_URL}/{TELEGRAM_TOKEN}")
-        logging.info("🚀 Webhook configurado e bot rodando no Render.")
-        app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+    port = int(os.environ.get("PORT", 10000))
 
-    asyncio.run(run())
+    async def main():
+        # Garante que o bot foi iniciado antes do Flask
+        await application.initialize()
+        await application.start()
+        print("🚀 Webhook configurado e bot rodando no Render.")
+
+        app.run(host="0.0.0.0", port=port)
+
+    asyncio.run(main())
