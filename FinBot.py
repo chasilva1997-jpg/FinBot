@@ -9,7 +9,7 @@ from flask import Flask, request
 from threading import Thread
 from google.oauth2.service_account import Credentials
 from telegram import Bot, Update
-from telegram.ext import Application, ContextTypes, MessageHandler, filters
+from telegram.ext import Application, ContextTypes, MessageHandler, CommandHandler, filters
 
 # ===============================
 # CONFIGURAÇÕES E LOGS
@@ -25,7 +25,9 @@ WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")  # seu ID do Telegram (adicione no Render)
 
 if not all([TELEGRAM_TOKEN, SHEET_ID, GOOGLE_CREDENTIALS, WEBHOOK_URL]):
-    raise Exception("❌ Variáveis de ambiente faltando. Verifique TELEGRAM_TOKEN, SHEET_ID, GOOGLE_CREDENTIALS, WEBHOOK_URL.")
+    raise Exception(
+        "❌ Variáveis de ambiente faltando. Verifique TELEGRAM_TOKEN, SHEET_ID, GOOGLE_CREDENTIALS, WEBHOOK_URL.")
+
 
 # ===============================
 # GOOGLE SHEETS
@@ -60,6 +62,31 @@ def salvar_dados(nome, valor, categoria, data, forma_pagamento, observacoes):
         observacoes or "—"
     ])
 
+
+def obter_totais():
+    """Lê o Google Sheets e retorna total geral e por categoria."""
+    sheet = conectar_sheets()
+    dados = sheet.get_all_records()  # Lê todas as linhas (exceto cabeçalho)
+
+    if not dados:
+        return 0, {}
+
+    total_geral = 0
+    totais_por_categoria = {}
+
+    for linha in dados:
+        try:
+            valor = float(linha["Valor (R$)"] if "Valor (R$)" in linha else linha["Valor"])
+        except Exception:
+            continue
+
+        categoria = linha.get("Categoria", "Geral").title()
+        total_geral += valor
+        totais_por_categoria[categoria] = totais_por_categoria.get(categoria, 0) + valor
+
+    return total_geral, totais_por_categoria
+
+
 # ===============================
 # INTERPRETA MENSAGEM
 # ===============================
@@ -91,6 +118,7 @@ def parse_mensagem(mensagem, data_mensagem):
 
     return valor, categoria, data, forma_pagamento, observacoes
 
+
 # ===============================
 # BOT TELEGRAM
 # ===============================
@@ -118,17 +146,55 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if update.message:
             await update.message.reply_text("⚠️ Erro ao registrar o gasto. Tente novamente em instantes.")
 
+
+# ===============================
+# COMANDOS /total e /categorias
+# ===============================
+async def comando_total(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Responde com o total geral de gastos."""
+    try:
+        total, _ = obter_totais()
+        await update.message.reply_text(f"💰 Total de gastos registrados: *R$ {total:.2f}*", parse_mode="Markdown")
+    except Exception as e:
+        logging.error(f"Erro ao calcular total: {e}")
+        await update.message.reply_text("⚠️ Erro ao calcular total. Tente novamente.")
+
+
+async def comando_categorias(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Responde com os totais agrupados por categoria."""
+    try:
+        _, totais_por_categoria = obter_totais()
+        if not totais_por_categoria:
+            await update.message.reply_text("📊 Nenhum gasto encontrado ainda.")
+            return
+
+        resposta = "📂 *Total por Categoria:*\n\n"
+        for cat, val in totais_por_categoria.items():
+            resposta += f"• {cat}: R$ {val:.2f}\n"
+
+        await update.message.reply_text(resposta, parse_mode="Markdown")
+    except Exception as e:
+        logging.error(f"Erro ao calcular categorias: {e}")
+        await update.message.reply_text("⚠️ Erro ao calcular gastos por categoria.")
+
+
 # ===============================
 # FLASK + WEBHOOK
 # ===============================
 flask_app = Flask(__name__)
 bot = Bot(token=TELEGRAM_TOKEN)
 app = Application.builder().token(TELEGRAM_TOKEN).build()
+
+# Handlers
 app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), process_message))
+app.add_handler(CommandHandler("total", comando_total))
+app.add_handler(CommandHandler("categorias", comando_categorias))
+
 
 @flask_app.route("/")
 def home():
     return "🚀 FinBot está online e operando com Webhook!"
+
 
 @flask_app.route("/webhook", methods=["POST"])
 def webhook():
@@ -140,6 +206,7 @@ def webhook():
     except Exception as e:
         logging.error(f"Erro no webhook: {e}")
         return "erro", 500
+
 
 # ===============================
 # FUNÇÕES AUXILIARES
@@ -160,9 +227,10 @@ async def registrar_webhook():
                 )
             return
         except Exception as e:
-            logging.warning(f"Tentativa {tentativa+1}/3 falhou: {e}")
+            logging.warning(f"Tentativa {tentativa + 1}/3 falhou: {e}")
             await asyncio.sleep(3)
     logging.error("❌ Falha ao registrar o webhook após 3 tentativas.")
+
 
 async def lembrete_periodico():
     """Envia lembrete a cada 3 horas para não esquecer de registrar gastos."""
@@ -178,9 +246,11 @@ async def lembrete_periodico():
             logging.error(f"Erro ao enviar lembrete: {e}")
         await asyncio.sleep(3 * 60 * 60)  # 3 horas
 
+
 def run_flask():
     """Executa o servidor Flask."""
     flask_app.run(host="0.0.0.0", port=8080)
+
 
 # ===============================
 # INICIALIZAÇÃO
@@ -189,6 +259,7 @@ if __name__ == "__main__":
     logging.info("🚀 Iniciando FinBot com Webhook (modo Looker)...")
     Thread(target=run_flask).start()
 
+
     async def iniciar_bot():
         await registrar_webhook()
         asyncio.create_task(lembrete_periodico())
@@ -196,5 +267,6 @@ if __name__ == "__main__":
         await app.start()
         await app.updater.start_polling()
         await asyncio.Event().wait()
+
 
     asyncio.run(iniciar_bot())
