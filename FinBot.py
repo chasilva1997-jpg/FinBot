@@ -3,9 +3,7 @@ import re
 import json
 import gspread
 import logging
-import asyncio
-from datetime import datetime
-from flask import Flask, request
+from datetime import datetime, date
 from google.oauth2.service_account import Credentials
 from telegram import Update
 from telegram.ext import Application, ContextTypes, MessageHandler, CommandHandler, filters
@@ -21,10 +19,9 @@ logging.basicConfig(
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 SHEET_ID = os.getenv("SHEET_ID")
 GOOGLE_CREDENTIALS = os.getenv("GOOGLE_CREDENTIALS")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
-if not all([TELEGRAM_TOKEN, SHEET_ID, GOOGLE_CREDENTIALS, WEBHOOK_URL]):
-    raise Exception("❌ Faltam variáveis de ambiente: TELEGRAM_TOKEN, SHEET_ID, GOOGLE_CREDENTIALS ou WEBHOOK_URL.")
+if not all([TELEGRAM_TOKEN, SHEET_ID, GOOGLE_CREDENTIALS]):
+    raise Exception("❌ Faltam variáveis de ambiente: TELEGRAM_TOKEN, SHEET_ID ou GOOGLE_CREDENTIALS.")
 
 # ===============================
 # GOOGLE SHEETS
@@ -43,9 +40,11 @@ def conectar_sheets():
 
 
 def salvar_dados(nome, valor, categoria, data, forma_pagamento, observacoes):
+    """Salva o valor como texto '12.50' para evitar bug de formatação do Sheets"""
     sheet = conectar_sheets()
-    valor_str = f"{valor:.2f}"
     data_iso = data.strftime("%Y-%m-%d")
+
+    valor_str = f"{valor:.2f}"  # salva como texto "12.50"
     sheet.append_row([
         nome,
         valor_str,
@@ -57,6 +56,7 @@ def salvar_dados(nome, valor, categoria, data, forma_pagamento, observacoes):
 
 
 def obter_totais():
+    """Calcula total geral e por categoria"""
     sheet = conectar_sheets()
     dados = sheet.get_all_records()
 
@@ -67,10 +67,11 @@ def obter_totais():
     totais_por_categoria = {}
 
     for linha in dados:
-        valor_bruto = str(linha.get("Valor", "")).strip()
+        valor_bruto = str(linha["Valor"]).strip()
         if not valor_bruto:
             continue
 
+        # Converte corretamente tanto "12,50" quanto "12.50"
         valor_bruto = valor_bruto.replace(",", ".")
         try:
             valor = float(valor_bruto)
@@ -141,6 +142,9 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Erro ao registrar o gasto. Tente novamente.")
 
 
+# ===============================
+# COMANDOS
+# ===============================
 async def comando_total(update: Update, context: ContextTypes.DEFAULT_TYPE):
     total, _ = obter_totais()
     await update.message.reply_text(f"💰 Total de gastos: R$ {total:.2f}")
@@ -186,37 +190,20 @@ async def comando_ajuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ===============================
-# FLASK + WEBHOOK (Render)
+# INICIALIZAÇÃO
 # ===============================
-app = Flask(__name__)
+def main():
+    logging.info("🚀 Iniciando FinBot (modo local - polling)...")
+    app = Application.builder().token(TELEGRAM_TOKEN).build()
 
-application = Application.builder().token(TELEGRAM_TOKEN).build()
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_message))
-application.add_handler(CommandHandler("total", comando_total))
-application.add_handler(CommandHandler("categorias", comando_categorias))
-application.add_handler(CommandHandler("resumo", comando_resumo))
-application.add_handler(CommandHandler("ajuda", comando_ajuda))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_message))
+    app.add_handler(CommandHandler("total", comando_total))
+    app.add_handler(CommandHandler("categorias", comando_categorias))
+    app.add_handler(CommandHandler("resumo", comando_resumo))
+    app.add_handler(CommandHandler("ajuda", comando_ajuda))
 
-
-@app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
-def webhook():
-    update_data = request.get_json(force=True)
-    update = Update.de_json(update_data, application.bot)
-    asyncio.run(application.initialize())
-    asyncio.run(application.process_update(update))
-    return "OK", 200
-
-
-@app.route("/")
-def home():
-    return "FinBot ativo 🚀"
+    app.run_polling()
 
 
 if __name__ == "__main__":
-    import requests
-    webhook_url = f"{WEBHOOK_URL}/{TELEGRAM_TOKEN}"
-    requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook", data={"url": webhook_url})
-    logging.info("🚀 Webhook configurado e FinBot ativo.")
-
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    main()
